@@ -302,22 +302,28 @@
   // Returns an array of { key, type } or null if nothing found.
   // Using 2+ unusual property names is far more reliable than single-property matching,
   // since no two unrelated components share the same set of unusual method names.
+  const GENERIC_METHODS = new Set(['extend', 'init', 'destroy', 'willDestroy', 'willDestroyElement',
+    'didInsertElement', 'didRender', 'didReceiveAttrs', 'didUpdateAttrs', 'willRender',
+    'willClearRender', 'didDestroyElement', 'unknownProperty', 'setUnknownProperty',
+    'addObserver', 'removeObserver', 'notifyPropertyChange', 'toggleProperty',
+    'get', 'set', 'getProperties', 'setProperties', 'incrementProperty', 'decrementProperty',
+    'cacheFor', 'getWithDefault',
+    '_super', 'send', 'trigger', 'on', 'off', 'has', 'register', 'unregister',
+    '_initObservers', 'initDataBindings', 'initObservers', 'removeObservers',
+    'removeDataBindings', 'wrapTra', 'addOverlays', 'setProperty', 'observe',
+    'mouseEnter', 'closeModal', 'onClick', 'showNotification',
+    'merge', 'each', 'click', 'error', 'show', 'hide', 'toggle',
+    'data', 'close', 'log', 'lookup', 'program', 'strict',
+    'computed', 'property', 'volatile', 'readOnly', 'meta']);
   function findUniqueProps(comp) {
     if (!comp) return null;
-    const generic = new Set(['extend', 'init', 'destroy', 'willDestroy', 'willDestroyElement',
-      'didInsertElement', 'didRender', 'didReceiveAttrs', 'didUpdateAttrs', 'willRender',
-      'willClearRender', 'didDestroyElement', 'unknownProperty', 'setUnknownProperty',
-      'addObserver', 'removeObserver', 'notifyPropertyChange', 'toggleProperty',
-      'get', 'set', 'getProperties', 'setProperties', 'incrementProperty', 'decrementProperty',
-      'cacheFor', 'getWithDefault',
-      '_super', 'send', 'trigger', 'on', 'off', 'has', 'register', 'unregister']);
     const actionSet = new Set(comp.actions || []);
     const props = [];
 
     // 1. Collect non-generic, non-action method names (most reliable — always own properties)
     if (comp.methods) {
       for (const key of Object.keys(comp.methods)) {
-        if (!generic.has(key) && !actionSet.has(key)) {
+        if (!GENERIC_METHODS.has(key) && !actionSet.has(key)) {
           props.push({ key, type: 'method' });
         }
       }
@@ -334,9 +340,21 @@
 
     // 3. Use up to 3 keys for the fingerprint
     if (props.length >= 2) return props.slice(0, 3);
-    if (props.length === 1) return props;
 
-    // 4. Fallback: parse extend() args for the first property key
+    // 4. Fallback: use ALL methods (even generic ones) as multi-key fingerprint.
+    //    A combination of 2+ generic methods is still more specific than a single
+    //    generic method, and much more reliable than a string matcher for unclassed items.
+    //    Only exclude truly universal Ember internals (init, destroy, etc).
+    //    Shared names like setProperty are fine in combination.
+    if (comp.methods) {
+      const allKeys = Object.keys(comp.methods).filter(k =>
+        !['init', 'destroy', 'willDestroy', 'willDestroyElement',
+          'didInsertElement', 'didRender', 'didReceiveAttrs', 'willRender',
+          '_super', 'send', 'trigger', 'extend'].includes(k));
+      if (allKeys.length >= 2) return allKeys.slice(0, 3).map(k => ({ key: k, type: 'method' }));
+    }
+
+    // 5. Fallback: parse extend() args for the first property key
     if (comp.methods && comp.methods.extend && comp.methods.extend.args) {
       const m = comp.methods.extend.args.match(/^{s*(w+)s*:/);
       if (m) return [{ key: m[1], type: 'method' }];
@@ -355,10 +373,19 @@
         matcherProps = [{ key: itemName, type }];
       } else {
         matcherProps = findUniqueProps(currentComponent);
+        // Fallback: if no unique props found, use the first available method
+        // (single generic method is better than string matcher for unclassed items)
+        if (!matcherProps && currentComponent && currentComponent.methods) {
+          const keys = Object.keys(currentComponent.methods);
+          if (keys.length >= 1) {
+            matcherProps = [{ key: keys[0], type: 'method' }];
+          }
+        }
       }
     }
     
     let matcherCode = `'${compName}'`;
+    let useComponentName = false;
     if (matcherProps && matcherProps.length) {
       if (matcherProps.length >= 2) {
         const keys = matcherProps.map(p => `'${p.key}'`);
@@ -369,8 +396,15 @@
         }
       } else {
         const prop = matcherProps[0];
-        matcherCode = `(args) => args.some(arg => arg && arg.${prop.key} !== undefined)`;
-        if (prop.key !== itemName) {
+        matcherCode = `(args) => args.some(arg => { const k = Object.keys(arg || {}); return k.includes('${prop.key}') })`;
+        // Check if this prop is shared across many items (potential false matches)
+        const sharedCount = ALL_DATA.filter(d => d.methods && d.methods[prop.key]).length;
+        if (sharedCount >= 3) {
+          useComponentName = true;
+          if (prop.key !== itemName) {
+            matcherCode += `, // WARNING: '${prop.key}' is shared by ${sharedCount} components — may cause false matches`;
+          }
+        } else if (prop.key !== itemName) {
           matcherCode += `, // auto-picked ${prop.type}: ${prop.key}`;
         }
       }
@@ -387,6 +421,10 @@
   name: '${compName}-${itemName.toLowerCase()}-hook',${ruleType}
   matcher: ${matcherCode}
 `;
+    if (useComponentName) {
+      code += `  componentName: '${compName}',
+`;
+    }
     if (type === 'hook') {
       code += `  mixin(Ember) {
     return {
