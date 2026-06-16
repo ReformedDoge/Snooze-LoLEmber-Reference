@@ -468,8 +468,8 @@
       code += `  mixin(Ember) {
     return {
       init() {
-        this.addObserver('${itemName}', this, '${observerName}');
         this._super(...arguments);
+        this.addObserver('${itemName}', this, '${observerName}');
         // Defer read — computed property may fail during init
         Ember.run.next(this, function() {
           const val = this.get('${itemName}');
@@ -481,8 +481,8 @@
         const newVal = this.get('${itemName}');
         console.log('[${compName}] ${itemName} changed:', newVal);
         
-        // Example: override the value
-        // this.set('${itemName}', 'your-custom-value');
+        // Example: override the value (guard against recursion)
+        // if (this.get('${itemName}') !== 'your-custom-value') this.set('${itemName}', 'your-custom-value');
       },
       
       willDestroy() {
@@ -497,8 +497,8 @@
       code += `  mixin(Ember) {
     return {
       init() {
-        this.addObserver('${itemName}', this, '${observerName}');
         this._super(...arguments);
+        this.addObserver('${itemName}', this, '${observerName}');
       },
       
       ${observerName}() {
@@ -506,7 +506,7 @@
         console.log('[${compName}] ${itemName} written:', newVal);
         
         // Example: intercept and modify the write
-        // if (newVal === 'unwanted') this.set('${itemName}', 'fixed-value');
+        // if (newVal !== 'fixed-value') this.set('${itemName}', 'fixed-value');
       },
       
       // Or override the setter entirely (advanced)
@@ -569,8 +569,8 @@
       const observerName = itemName.replace(/[^a-zA-Z0-9_$]/g, '_') + 'Observer';
       return `${extendFn}(${target}, (Ember) => ({
   init() {
-    this.addObserver('${itemName}', this, '${observerName}');
     this._super(...arguments);
+    this.addObserver('${itemName}', this, '${observerName}');
     // Defer read — computed property may fail during init
     Ember.run.next(this, function() {
       const val = this.get('${itemName}');
@@ -582,8 +582,8 @@
     const newVal = this.get('${itemName}');
     console.log('[${compName}] ${itemName} changed:', newVal);
     
-    // Example: override the value
-    // this.set('${itemName}', 'your-custom-value');
+    // Example: override the value (guard against recursion)
+    // if (this.get('${itemName}') !== 'your-custom-value') this.set('${itemName}', 'your-custom-value');
   },
   
   willDestroy() {
@@ -596,8 +596,8 @@
       const observerName = itemName.replace(/[^a-zA-Z0-9_$]/g, '_') + 'Observer';
       return `${extendFn}(${target}, (Ember) => ({
   init() {
-    this.addObserver('${itemName}', this, '${observerName}');
     this._super(...arguments);
+    this.addObserver('${itemName}', this, '${observerName}');
   },
   
   ${observerName}() {
@@ -605,7 +605,7 @@
     console.log('[${compName}] ${itemName} written:', newVal);
     
     // Example: intercept and modify the write
-    // if (newVal === 'unwanted') this.set('${itemName}', 'fixed-value');
+    // if (newVal !== 'fixed-value') this.set('${itemName}', 'fixed-value');
   },
   
   // Or override the setter entirely (advanced)
