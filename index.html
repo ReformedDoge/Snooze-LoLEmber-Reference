@@ -151,6 +151,9 @@
   .copy-btn { background: var(--bg-elevated); border: 1px solid var(--border); color: var(--text-main); padding: 4px 10px; border-radius: 4px; cursor: pointer; font-size: 11px; transition: all 0.15s; font-weight: 600; text-transform: none; letter-spacing: 0; }
   .copy-btn:hover { background: var(--border-hover); border-color: var(--text-muted); }
   .copy-btn.success { background: var(--tag-hook); color: #000; border-color: var(--tag-hook); }
+  .snippet-tab { background: transparent; border: 1px solid var(--border); color: var(--text-muted); padding: 3px 8px; border-radius: 4px; cursor: pointer; font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; transition: all 0.15s; }
+  .snippet-tab:hover { border-color: var(--text-muted); color: var(--text-main); }
+  .snippet-tab.active { background: var(--accent); border-color: var(--accent); color: #000; }
   
   pre { margin: 0; padding: 16px; background: #000; overflow-x: auto; font-family: 'JetBrains Mono', monospace; font-size: 12.5px; line-height: 1.6; color: #e4e4e7; }
   .kw { color: #c678dd; }
@@ -210,6 +213,9 @@
   let currentComponent = null;
   let currentActiveChip = null;
   let currentSnippet = '';
+  let snoozeSnippet = '';
+  let uplSnippet = '';
+  let snippetTab = 'snooze';
 
   // Elements
   const listEl = document.getElementById('comp-list');
@@ -363,18 +369,19 @@
     return null;
   }
 
+  // ─── Snippet Generators (Snooze + UPL) ──────────────────────────────
+  
   function getSnippet(compName, type, itemName, details, isUnclassed) {
-    // For unclassed components, use function matchers with multi-property fingerprints.
-    // Computed and method types already know the direct property to match on.
-    // For hooks, actions, reads, writes, observes — auto-pick a fingerprint.
+    return { snooze: getSnoozeSnippet(compName, type, itemName, details, isUnclassed), upl: getUplSnippet(compName, type, itemName, details, isUnclassed) };
+  }
+
+  function buildMatcher(compName, type, itemName, isUnclassed) {
     let matcherProps = null;
     if (isUnclassed) {
       if (type === 'method' || type === 'computed') {
         matcherProps = [{ key: itemName, type }];
       } else {
         matcherProps = findUniqueProps(currentComponent);
-        // Fallback: if no unique props found, use the first available method
-        // (single generic method is better than string matcher for unclassed items)
         if (!matcherProps && currentComponent && currentComponent.methods) {
           const keys = Object.keys(currentComponent.methods);
           if (keys.length >= 1) {
@@ -383,7 +390,6 @@
         }
       }
     }
-    
     let matcherCode = `'${compName}'`;
     let useComponentName = false;
     if (matcherProps && matcherProps.length) {
@@ -391,49 +397,44 @@
         const keys = matcherProps.map(p => `'${p.key}'`);
         matcherCode = `(args) => args.some(arg => { const k = Object.keys(arg || {}); return k.includes(${keys.join(') && k.includes(')}) ; })`;
         const autoPicked = matcherProps.filter(p => p.key !== itemName).map(p => p.key);
-        if (autoPicked.length) {
-          matcherCode += `, // fingerprint: ${matcherProps.map(p => p.key).join(', ')}`;
-        }
+        if (autoPicked.length) matcherCode += `, // fingerprint: ${matcherProps.map(p => p.key).join(', ')}`;
       } else {
         const prop = matcherProps[0];
         matcherCode = `(args) => args.some(arg => { const k = Object.keys(arg || {}); return k.includes('${prop.key}') })`;
-        // Check if this prop is shared across many items (potential false matches)
         const sharedCount = ALL_DATA.filter(d => d.methods && d.methods[prop.key]).length;
-        if (sharedCount >= 3) {
-          useComponentName = true;
-          if (prop.key !== itemName) {
-            matcherCode += `, // WARNING: '${prop.key}' is shared by ${sharedCount} components — may cause false matches`;
-          }
-        } else if (prop.key !== itemName) {
-          matcherCode += `, // auto-picked ${prop.type}: ${prop.key}`;
-        }
+        if (sharedCount >= 3) { useComponentName = true; if (prop.key !== itemName) matcherCode += `, // WARNING: '${prop.key}' is shared by ${sharedCount} components — may cause false matches`; }
+        else if (prop.key !== itemName) matcherCode += `, // auto-picked ${prop.type}: ${prop.key}`;
       }
     }
     matcherCode += `,`;
-    
+    return { matcherCode, useComponentName, isFunctionMatcher: !!matcherProps, matcherProps };
+  }
+
+  function toUplMatcher(matcherProps) {
+    if (!matcherProps || matcherProps.length === 0) return null;
+    const checks = matcherProps.map(p => `'${p.key}' in obj`);
+    return `(obj) => obj && ${checks.join(' && ')}`;
+  }
+
+  function getSnoozeSnippet(compName, type, itemName, details, isUnclassed) {
+    const { matcherCode, useComponentName } = buildMatcher(compName, type, itemName, isUnclassed);
     let ruleType = '';
-    if (currentComponent && currentComponent.type === 'service') {
-      ruleType = `
+    if (currentComponent && currentComponent.type === 'service') ruleType = `
   type: 'service',`;
-    }
-    
     let code = `Utils.Hooks.Ember.registerRule({
   name: '${compName}-${itemName.toLowerCase()}-hook',${ruleType}
   matcher: ${matcherCode}
 `;
-    if (useComponentName) {
-      code += `  componentName: '${compName}',
+    if (useComponentName) code += `  componentName: '${compName}',
 `;
-    }
     if (type === 'hook') {
-      code += `  mixin(Ember) {
-    return {
-      ${itemName}(...args) {
-        console.log('[${compName}] Hook ${itemName} fired! Args:', args);
-        this._super(...arguments);
-      }
-    };
-  }
+      code += `  hookMethods: [{
+    name: '${itemName}',
+    callback(Ember, original, ...args) {
+      console.log('[${compName}] Hook ${itemName} fired! Args:', args);
+      original(...args);
+    }
+  }]
 });`;
     } else if (type === 'action') {
       code += `  mixin(Ember) {
@@ -523,6 +524,103 @@
 });`;
     }
     return code;
+  }
+
+  function getUplSnippet(compName, type, itemName, details, isUnclassed) {
+    const { matcherCode, useComponentName, isFunctionMatcher, matcherProps } = buildMatcher(compName, type, itemName, isUnclassed);
+    const isService = currentComponent && currentComponent.type === 'service';
+    let rawMatcher = isFunctionMatcher ? toUplMatcher(matcherProps) : null;
+    if (!rawMatcher && isService) {
+      rawMatcher = `(obj) => obj && typeof obj.${itemName} !== 'undefined'`;
+    }
+    
+    const hookFn = isService ? 'upl.hooks.ember.hookServiceMethodByMatching' : (rawMatcher ? 'upl.hooks.ember.hookComponentMethodByMatching' : 'upl.hooks.ember.hookComponentMethodByName');
+    const extendFn = isService ? 'upl.hooks.ember.extendServiceByMatching' : (rawMatcher ? 'upl.hooks.ember.extendClassByMatching' : 'upl.hooks.ember.extendClassByName');
+    const target = rawMatcher ? rawMatcher : `'${compName}'`;
+    
+    if (type === 'hook' || type === 'action' || type === 'method') {
+      const logPrefix = type === 'hook' ? 'Hook' : (type === 'action' ? 'Action' : 'Method');
+      const argHint = details && details.params ? ` // (${details.params})` : '';
+      let cbBody = ``;
+      if (type === 'hook') {
+        cbBody = `
+  console.log('[${compName}] ${logPrefix} ${itemName} fired! Args:', args);
+  original(...args);
+`;
+      } else if (type === 'action') {
+        cbBody = `
+  console.log('[${compName}] ${logPrefix} ${itemName} intercepted! Args:', args);
+  return original(...args);
+`;
+      } else {
+        cbBody = `
+  console.log('[${compName}] ${logPrefix} ${itemName} intercepted! Args:', args);
+      
+      // Modify args here if needed (e.g. args[0] = ...)
+      
+      const result = original(...args);
+      console.log('[${compName}] ${logPrefix} ${itemName} returned:', result);
+      return result;
+`;
+      }
+      return `${hookFn}(${target}, '${itemName}', (Ember, original, ...args) => {${argHint}${cbBody}});`;
+    }
+    if (type === 'read' || type === 'computed' || type === 'observe') {
+      const observerName = itemName.replace(/[^a-zA-Z0-9_$]/g, '_') + 'Observer';
+      return `${extendFn}(${target}, (Ember) => ({
+  init() {
+    this.addObserver('${itemName}', this, '${observerName}');
+    this._super(...arguments);
+    // Defer read — computed property may fail during init
+    Ember.run.next(this, function() {
+      const val = this.get('${itemName}');
+      console.log('[${compName}] ${itemName} (initial):', val);
+    });
+  },
+  
+  ${observerName}() {
+    const newVal = this.get('${itemName}');
+    console.log('[${compName}] ${itemName} changed:', newVal);
+    
+    // Example: override the value
+    // this.set('${itemName}', 'your-custom-value');
+  },
+  
+  willDestroy() {
+    this.removeObserver('${itemName}', this, '${observerName}');
+    this._super(...arguments);
+  }
+}));`;
+    }
+    if (type === 'write') {
+      const observerName = itemName.replace(/[^a-zA-Z0-9_$]/g, '_') + 'Observer';
+      return `${extendFn}(${target}, (Ember) => ({
+  init() {
+    this.addObserver('${itemName}', this, '${observerName}');
+    this._super(...arguments);
+  },
+  
+  ${observerName}() {
+    const newVal = this.get('${itemName}');
+    console.log('[${compName}] ${itemName} written:', newVal);
+    
+    // Example: intercept and modify the write
+    // if (newVal === 'unwanted') this.set('${itemName}', 'fixed-value');
+  },
+  
+  // Or override the setter entirely (advanced)
+  // set${itemName.charAt(0).toUpperCase() + itemName.slice(1)}(value) {
+  //   console.log('[${compName}] Intercepted set:', value);
+  //   this._super(value); // or custom logic
+  // },
+  
+  willDestroy() {
+    this.removeObserver('${itemName}', this, '${observerName}');
+    this._super(...arguments);
+  }
+}));`;
+    }
+    return '';
   }
 
   // Descriptions mapping
@@ -672,7 +770,11 @@
         analysisHtml += `</div>`;
     }
 
-    currentSnippet = getSnippet(currentComponent.name, type, name, data, isUnclassed);
+    const snippets = getSnippet(currentComponent.name, type, name, data, isUnclassed);
+    snoozeSnippet = snippets.snooze;
+    uplSnippet = snippets.upl;
+    snippetTab = 'snooze';
+    currentSnippet = snoozeSnippet;
     
     let sourceHtml = '';
     if (data && data.source) {
@@ -690,10 +792,16 @@
       ${sourceHtml}
       <div class="code-block">
         <div class="code-block-header">
-          <span>Hook Snippet</span>
+          <div style="display:flex;gap:4px;align-items:center">
+            <span style="font-size:11px;color:var(--text-muted);text-transform:uppercase;font-weight:600;letter-spacing:0.5px">Hook Snippet</span>
+            <div class="snippet-tabs" style="display:flex;gap:2px;margin-left:8px">
+              <button class="snippet-tab active" data-tab="snooze" onclick="switchSnippetTab('snooze', this)">Snooze</button>
+              <button class="snippet-tab" data-tab="upl" onclick="switchSnippetTab('upl', this)">UPL</button>
+            </div>
+          </div>
           <button class="copy-btn" onclick="copySnippetText(this)">Copy Snippet</button>
         </div>
-        <pre><code>${highlight(currentSnippet)}</code></pre>
+        <pre><code id="snippet-code">${highlight(currentSnippet)}</code></pre>
       </div>
     `;
   }
@@ -703,6 +811,13 @@
     if (currentActiveChip) currentActiveChip.classList.remove('active');
   }
   window.closeInspector = closeInspector;
+
+  window.switchSnippetTab = function(tab, btn) {
+    snippetTab = tab;
+    currentSnippet = tab === 'upl' ? uplSnippet : snoozeSnippet;
+    document.querySelectorAll('.snippet-tab').forEach(b => b.classList.toggle('active', b.dataset.tab === tab));
+    document.getElementById('snippet-code').innerHTML = highlight(currentSnippet);
+  };
 
   window.copySnippetText = function(btn) {
     navigator.clipboard.writeText(currentSnippet).then(() => {
